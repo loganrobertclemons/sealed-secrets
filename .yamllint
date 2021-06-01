@@ -1,0 +1,45 @@
+---
+# Based on ansible-lint config
+extends: default
+rules:
+  braces:
+    max-spaces-inside: 1
+    level: error
+  brackets:
+    max-spaces-inside: 1
+    level: error
+  colons:
+    max-spaces-after: 1
+    max-spaces-before: 0
+    level: error
+  commas:
+    max-spaces-after: 1
+    max-spaces-before: 0
+    min-spaces-after: 1
+    level: error
+  comments:
+    ignore-shebangs: true
+    require-starting-space: true
+  comments-indentation: disable
+  document-start: disable
+  empty-lines:
+    max: 3
+    level: error
+  hyphens:
+    max-spaces-after: 1
+    level: error
+  indentation:
+    spaces: 2
+  key-duplicates: enable
+  line-length: disable
+  new-line-at-end-of-file: enable
+  new-lines:
+    type: unix
+  trailing-spaces: enable
+  truthy: disable
+ignore: |
+  # Skipping helm charts as yamllint does not like the golang templates
+  templates/
+  .yamllint
+  build.yaml
+  values.yaml

@@ -1,0 +1,424 @@
+trigger:
+  - master
+
+variables:
+  - group: Global Secrets - Artifactory
+  - name: version
+    value: 1.0.0
+  - name: dockerHubName
+    value: lirio-docker.jfrog.io
+  - name: imageName
+    value: ce-sealed-secrets
+  - name: namespace
+    value: ce
+  - name: helmChartName
+    value: ce-sealed-secrets
+  - name: helmDeployName
+    value: sealed-secrets
+  - name: dockerTest
+    value: sealed-secrets-test
+  - name: GREEN
+    value: \033[0;32m
+  - name: RED
+    value: \033[0;31m
+  - name: YELLOW
+    value: \033[0;33m
+  - name: NC
+    value: \033[0m
+
+stages:
+  - stage: Linting
+    displayName: Linting
+    pool:
+      name: CE
+      demands:
+        - env -equals dev
+
+    jobs:
+      - job: Linting
+        displayName: Linting
+        steps:
+          - task: Bash@3
+            displayName: yamllint
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Lints all the yaml files in the repo
+                # (There are ignored files in .yamllint)
+                echo -e "$(YELLOW)-- yamllint --$(NC)"
+                ylint=$(yamllint -c .yamllint .)
+                if [[ ! -z $ylint ]]
+                then
+                    echo -e "$(RED)yamllint - regular files:\t[FAILED]$(NC)"
+                    printf "$ylint\n\n"
+                    exit 1
+                fi
+                echo -e "$(GREEN)yamllint - regular files:\t[PASSED]$(NC)"
+
+                # Lints the helm chart from the rendered yamllint
+                helmylint=$(helm template charts/ado-build-agent | yamllint -c .yamllint -)
+                if [[ ! -z $helmylint ]]
+                then
+                    echo -e "$(RED)yamllint - helm charts:\t\t[FAILED]$(NC)"
+                    printf "$helmylint\n\n"
+                    exit 1
+                fi
+                echo -e "$(GREEN)yamllint - helm charts:\t\t[PASSED]$(NC)"
+
+          - task: Bash@3
+            displayName: helm lint
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo -e "$(YELLOW)-- helm lint --$(NC)"
+                helmlint=$(helm lint charts/*)
+                helmlintcheck=$(printf "$helmlint" | grep chart\(s\) | awk '{print $4}')
+                if [[ $helmlintcheck != 0 ]]
+                then
+                    echo -e "$(RED)helm lint:\t[FAILED]$(NC)"
+                    printf "$helmlint\n\n"
+                    exit 1
+                fi
+                echo -e "$(GREEN)helm lint:\t[PASSED]$(NC)"
+
+          - task: Bash@3
+            displayName: helm install verification
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo -e "$(YELLOW)-- helm install dry run --$(NC)"
+                # Get the AWS credentials
+                aws sts assume-role-with-web-identity --role-arn $AWS_ROLE_ARN --role-session-name ado-build-agent --web-identity-token file://$AWS_WEB_IDENTITY_TOKEN_FILE  --duration-seconds 3600 > /tmp/awscred.txt
+                export AWS_DEFAULT_REGION=us-east-1
+                export AWS_ACCESS_KEY_ID="$(cat /tmp/awscred.txt | jq -r ".Credentials.AccessKeyId")"
+                export AWS_SECRET_ACCESS_KEY="$(cat /tmp/awscred.txt | jq -r ".Credentials.SecretAccessKey")"
+                export AWS_SESSION_TOKEN="$(cat /tmp/awscred.txt | jq -r ".Credentials.SessionToken")"
+                rm /tmp/awscred.txt
+                echo -e "$(GREEN)AWS role login:\t[PASSED]$(NC)"
+
+                # Sets the kubeconfig
+                echo "Setting kubeconfig."
+                kubectl config use-context dev-apps
+
+                # Runs the helm dry-run
+                helmupgrade=$(helm upgrade --install --debug --dry-run $(helmDeployName) -n $(namespace) charts/$(helmChartName) -f charts/$(helmChartName)/values.yaml 2>&1)
+                printf "$helmupgrade\n\n"
+                if [[ $(echo $helmupgrade | grep "Error") ]]
+                then
+                    echo -e "$(RED)helm dry-run:\t[FAILED]$(NC)"
+                    exit 1
+                fi
+                echo -e "$(GREEN)helm dry-run:\t[PASSED]$(NC)"
+
+          - task: Bash@3
+            displayName: Module Version Check
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Gets the version in the build.yaml file
+                echo -e "$(YELLOW)-- Module Version Check --$(NC)"
+                build=$(cat build.yaml | grep -A1 'name: version' | awk NR==2'{print $2}')
+                changelog=$(cat CHANGELOG.md | grep '## \[[0-9]\{1,10\}\.[0-9]\{1,10\}\.[0-9]\{1,10\}\]' | awk NR==1'{print $2}' | cut -d '[' -f 2 | cut -d ']' -f 1)
+                chart_appversion=$(cat charts/$(helmChartName)/Chart.yaml | grep appVersion | awk '{print $2}')
+                chart_version=$(cat charts/$(helmChartName)/Chart.yaml | grep version | awk '{print $2}')
+                docker=$(cat src/Dockerfile | grep version | cut -d '"' -f 2)
+
+                # Outputs the results
+                  echo -e "build:\t\t\t\t${build}"
+                  echo -e "changelog:\t\t\t${changelog}"
+                  echo -e "chart_appversion:\t\t${chart_appversion}"
+                  echo -e "chart_version:\t\t\t${chart_version}"
+                  echo -e "docker:\t\t\t\t${docker}"
+                
+                # Makes sure all the versions are the same
+                if [[ $build == $changelog && $build == $chart_appversion && $build == $chart_version && $build == $docker ]]
+                then
+                  echo "Versions are the same"
+                else
+                  echo -e "$(RED)Module version check:\t\t[FAILED]$(NC)"
+                  exit 1
+                fi
+                echo -e "$(GREEN)Module version check:\t\t[PASSED]$(NC)"
+
+  - stage: Docker_Build
+    displayName: Docker Build
+    dependsOn: Linting
+    condition: succeeded()
+    pool:
+      name: CE
+      demands:
+        - env -equals dev
+
+    jobs:
+      - job: Docker_build
+        displayName: Docker Build
+        steps:
+          - task: Bash@3
+            displayName: Docker build and tag
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Sets the API version
+                echo -e "$(YELLOW)-- docker build --$(NC)"
+                export DOCKER_API_VERSION=1.39
+
+                # Builds the image
+                current=$(pwd)
+                cd src/
+
+                # Builds the image
+                docker build --network=host -f Dockerfile -t $(imageName):$(version) .
+                docker tag $(imageName):$(version) lirio-docker.jfrog.io/$(imageName):$(version).$(Build.BuildId)
+                docker tag $(imageName):$(version) lirio-docker.jfrog.io/$(imageName):$(version)
+                docker tag $(imageName):$(version) lirio-docker.jfrog.io/$(imageName):latest
+                cd $(pwd)
+
+      - job: Docker_test
+        displayName: Docker Test
+        dependsOn: Docker_build
+        steps:
+          - task: Bash@3
+            displayName: Docker test
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Sets the API version
+                echo -e "$(YELLOW)-- docker test --$(NC)"
+                export DOCKER_API_VERSION=1.39
+
+                # Runs the docker container
+                echo "Starting the container"
+                docker rm $(dockerTest) --force 2&>1
+                docker run -d --name $(dockerTest) $(imageName):$(version)
+
+                # Verifies the test container is running
+                echo "Verifies the container is running."
+                if [[ ! $(docker ps -a | grep $(dockerTest)) =~ "$(dockerTest)" ]]
+                then
+                  echo -e "$(RED)container running:\t[FAILED]$(NC)"
+                  exit 1
+                fi
+                echo -e "$(GREEN)container running:\t[PASSED]$(NC)"
+
+                # Removes the docker container
+                echo "Removing the test container."
+                docker stop $(dockerTest)
+                docker rm $(dockerTest) --force
+                echo -e "$(GREEN)docker test:\t\t[PASSED]$(NC)"   
+
+  - stage: Docker_Push
+    displayName: Docker Push
+    dependsOn: Docker_Build
+    # Only pushes the latest versions of the container on master branch
+    # condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    # Only pushes the latest versions of the container on when not a pull request
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: CE
+      demands:
+        - env -equals dev
+
+    jobs:
+      - job: Docker_Push
+        displayName: Docker Push
+        steps:
+          - task: Bash@3
+            displayName: Docker Login
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo -e "$(YELLOW)-- docker login --$(NC)"
+                docker login -u $(artifactory_user) -p $(artifactory_password) $(artifactory_dockerUrl)
+                echo -e "$(GREEN)docker login:\t\t[PASSED]$(NC)"
+
+          - task: Bash@3
+            displayName: Docker Push
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Sets the API version
+                echo -e "$(YELLOW)-- docker push --$(NC)"
+                export DOCKER_API_VERSION=1.39
+
+                docker push lirio-docker.jfrog.io/$(imageName):$(version).$(Build.BuildId)
+                docker push lirio-docker.jfrog.io/$(imageName):$(version)
+                docker push lirio-docker.jfrog.io/$(imageName):latest
+
+                # Removes the main image
+                mainImage=$(docker images | grep $(imageName)-dev | tr -s ' ' | cut -d ' ' -f 3)
+                if [[ ! -z $mainImage ]]
+                then
+                  echo "Removing test images."
+                  docker rmi $mainImage --force
+                fi
+                echo -e "$(GREEN)docker images removed:\t[PASSED]$(NC)"
+                echo -e "$(GREEN)docker push:\t\t[PASSED]$(NC)"     
+
+## here's where tagging would happen
+  - stage: Artifactory_Publish
+    displayName: Artifactory Publish
+    dependsOn: Docker_Push
+    # Only pushes the latest versions of the container on master branch
+    # condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    # Only pushes the latest versions of the container on when not a pull request
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: CE
+      demands:
+        - env -equals dev
+    
+    jobs:
+      - job: Artifactory_Publish
+        displayName: Artifactory Publish
+        steps:
+          - task: Bash@3
+            displayName: Helm Package
+            inputs:
+              targetType: 'inline'
+              script: |
+                # remove values files from helm chart artifactory
+                rm charts/values.yaml
+
+                helm repo index charts/$(helmChartName)
+                helm package charts/$(helmChartName)
+          
+          - task: Bash@3
+            displayName: Artifactory Publish
+            inputs:
+              targetType: 'inline'
+              script: |
+                curl -u $(artifactory_user):$(artifactory_password) -T $(helmChartName)-$(version).tgz "https://lirio.jfrog.io/artifactory/helm-infra-local/$(helmChartName)-$(version).tgz"
+
+  - stage: Kubernetes_DEV
+    displayName: Kubernetes DEV
+    dependsOn: Artifactory_Publish
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: CE
+      demands:
+        - env -equals dev
+
+    jobs:
+      - job: K8s_deploy
+        displayName: K8s deploy
+        steps:
+
+          - task: Bash@3
+            displayName: K8s deploy
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Get the AWS credentials
+                echo "Setting up the AWS credentials."
+                aws sts assume-role-with-web-identity  --role-arn $AWS_ROLE_ARN --role-session-name ce-build-agent --web-identity-token file://$AWS_WEB_IDENTITY_TOKEN_FILE  --duration-seconds 3600 > /tmp/awscred.txt
+                export AWS_ACCESS_KEY_ID="$(cat /tmp/awscred.txt | jq -r ".Credentials.AccessKeyId")"
+                export AWS_SECRET_ACCESS_KEY="$(cat /tmp/awscred.txt | jq -r ".Credentials.SecretAccessKey")"
+                export AWS_SESSION_TOKEN="$(cat /tmp/awscred.txt | jq -r ".Credentials.SessionToken")"
+                rm /tmp/awscred.txt
+
+                # Verifies AWS credentials
+                echo "Verifying the AWS credentials were pulled in."
+                awssts=$(aws sts get-caller-identity | jq -r '.Arn')
+                if [[ ! $awssts ]]
+                then
+                  echo "Failed to connect to AWS."
+                  exit 1
+                fi
+
+                # Sets the kube context
+                kubectl config use-context dev-apps
+
+                # Updates the image version
+                echo "Updating the helm environment value file to use the most recently tagged image."
+                sed -i 's/:latest/:$(version).$(Build.BuildId)/g' charts/$(helmChartName)/values.yaml
+
+                # Gets the current helm revision
+                echo "Getting the current helm revision number"
+                helmRevisionCurrent=$(helm list -n $(namespace) | awk '/$(helmDeployName)/ {print $3}')
+
+                # If no current revision, set the variable to 0
+                if [[ -z $helmRevisionCurrent ]]
+                then
+                  helmRevisionCurrent=0
+                fi
+
+                # Runs helm upgrade
+                helm upgrade --install dev-$(helmDeployName) -n $(namespace) charts/$(helmChartName) -f charts/$(helmChartName)/values.yaml
+                echo "successfully upgraded the helm chart."
+
+                # Gets the new helm revision
+                echo "Getting the new helm revision number."
+                helmRevisionNew=$(helm list -n $(namespace) | awk '/$(helmDeployName)/ {print $3}')
+                echo "Verifying there is a new revision"
+                revision=$(expr $helmRevisionNew - $helmRevisionCurrent)
+                if [[ $revision != 1 ]]
+                then
+                  echo "Failed to deploy the latest version of the helm chart."
+                  exit 1
+                fi
+
+  - stage: Kubernetes_PROD
+    displayName: Kubernetes PROD
+    dependsOn: Kubernetes_DEV
+    # Only pushes to kubernetes on master branch (non-prs)
+    # condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    # Only deploys the helm chart when it's not a pull request
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: CE
+      demands:
+        - env -equals prod
+
+    jobs:
+      - job: K8s_deploy
+        displayName: K8s deploy
+        steps:
+          - task: Bash@3
+            displayName: K8s deploy
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Get the AWS credentials
+                echo "Setting up the AWS credentials."
+                aws sts assume-role-with-web-identity  --role-arn $AWS_ROLE_ARN --role-session-name ce-build-agent --web-identity-token file://$AWS_WEB_IDENTITY_TOKEN_FILE  --duration-seconds 3600 > /tmp/awscred.txt
+                export AWS_ACCESS_KEY_ID="$(cat /tmp/awscred.txt | jq -r ".Credentials.AccessKeyId")"
+                export AWS_SECRET_ACCESS_KEY="$(cat /tmp/awscred.txt | jq -r ".Credentials.SecretAccessKey")"
+                export AWS_SESSION_TOKEN="$(cat /tmp/awscred.txt | jq -r ".Credentials.SessionToken")"
+                rm /tmp/awscred.txt
+
+                # Verifies AWS credentials
+                echo "Verifying the AWS credentials were pulled in."
+                awssts=$(aws sts get-caller-identity | jq -r '.Arn')
+                if [[ ! $awssts ]]
+                then
+                  echo "Failed to connect to AWS."
+                  exit 1
+                fi
+
+                # Sets the kubeconfig
+                echo "Building the kubeconfig."
+                aws eks --region us-east-1 update-kubeconfig --name prod-core-eks-apps-cluster
+                kubectl config use-context arn:aws:eks:us-east-1:143141098694:cluster/prod-core-eks-apps-cluster
+
+                # Updates the image version
+                echo "Updating the helm environment value file to use the most recently tagged image."
+                sed -i 's/:latest/:$(version).$(Build.BuildId)/g' charts/$(helmChartName)/prod-values.yaml
+
+                # Gets the current helm revision
+                echo "Getting the current helm revision number"
+                helmRevisionCurrent=$(helm list -n $(namespace) | awk '/$(helmDeployName)/ {print $3}')
+
+                # Runs helm upgrade
+                helm upgrade --install $(helmDeployName)-prod -n $(namespace) charts/$(helmChartName) -f charts/$(helmChartName)/values.yaml
+                echo "successfully upgraded the helm chart."
+
+                # Gets the new helm revision
+                echo "Getting the new helm revision number."
+                helmRevisionNew=$(helm list -n $(namespace) | awk '/$(helmDeployName)/ {print $3}')
+                echo "Verifying there is a new revision"
+                revision=$(expr $helmRevisionNew - $helmRevisionCurrent)
+                if [[ $revision != 1 ]]
+                then
+                  echo "Failed to deploy the latest version of the helm chart."
+                  exit 1
+                fi

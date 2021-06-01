@@ -1,0 +1,33 @@
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: {{ template "sealedsecrets.name" . }}-admin
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/name: {{ template "sealedsecrets.name" . }}
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "sealedsecrets.name" . }}-key-admin
+subjects:
+- kind: ServiceAccount
+  name: {{ template "sealedsecrets.serviceAccountName" . }}
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: {{ template "sealedsecrets.name" . }}-service-proxy-controller
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/name: {{ template "sealedsecrets.name" . }}
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "sealedsecrets.name" . }}-service-proxier
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticateds

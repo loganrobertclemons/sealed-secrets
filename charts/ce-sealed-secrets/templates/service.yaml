@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.service.name }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/name: {{ template "sealedsecrets.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - port: {{ .Values.service.spec.ports.port }}
+    targetPort: {{ .Values.service.spec.ports.targetPort }}
+  selector:
+    name: {{ .Values.service.name }}
+  type: {{ .Values.service.spec.type }}

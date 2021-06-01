@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "sealedsecrets.name" . }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/name: {{ template "sealedsecrets.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  minReadySeconds: 30
+  replicas: {{ .Values.sealedSecrets.spec.replicas }}
+  revisionHistoryLimit: {{ .Values.sealedSecrets.spec.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      name: {{ template "sealedsecrets.name" . }}
+  strategy:
+    type: {{ .Values.sealedSecrets.spec.type }}
+    {{- if eq .Values.sealedSecrets.spec.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        name: {{ template "sealedsecrets.name" . }}
+    spec:
+      imagePullSecrets:
+        - name: jfrog-reg-secret
+      containers:
+      - args: []
+        command:
+        - controller
+        env: []
+        image: {{ .Values.sealedSecrets.spec.image.name }}:{{ .Values.sealedSecrets.spec.image.tag }}
+        imagePullPolicy: {{ .Values.sealedSecrets.spec.image.pullPolicy }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+        name: {{ template "sealedsecrets.name" . }}
+        ports:
+        - containerPort: {{ .Values.service.spec.ports.port }}
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+        stdin: false
+        tty: false
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+      initContainers: []
+      securityContext:
+        fsGroup: 65534
+      serviceAccountName: {{ template "sealedsecrets.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: tmp
