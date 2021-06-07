@@ -4,7 +4,6 @@ serviceAccount:
   name: sealed-secrets-controller
 
 service:
-  name: sealed-secrets
   spec:
     ports:
       type: ClusterIP

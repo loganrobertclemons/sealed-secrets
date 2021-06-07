@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ template "sealedsecrets.name" . }}
+  name: sealed-secrets-controller
   labels:
     helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
     app.kubernetes.io/name: {{ template "sealedsecrets.name" . }}
@@ -12,7 +12,7 @@ spec:
   revisionHistoryLimit: {{ .Values.sealedSecrets.spec.revisionHistoryLimit }}
   selector:
     matchLabels:
-      name: {{ template "sealedsecrets.name" . }}
+      name: sealed-secrets-controller
   strategy:
     type: {{ .Values.sealedSecrets.spec.type }}
     {{- if eq .Values.sealedSecrets.spec.type "RollingUpdate" }}
@@ -23,7 +23,7 @@ spec:
   template:
     metadata:
       labels:
-        name: {{ template "sealedsecrets.name" . }}
+        name: sealed-secrets-controller
     spec:
       imagePullSecrets:
         - name: jfrog-reg-secret
