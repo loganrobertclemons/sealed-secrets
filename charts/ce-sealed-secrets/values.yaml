@@ -1,4 +1,4 @@
-namespace: ce
+namespace: kube-system
 
 serviceAccount:
   name: sealed-secrets-controller
@@ -16,6 +16,6 @@ sealedSecrets:
     type: RollingUpdate
     revisionHistoryLimit: 10
     image:
-      name: lirio-docker.jfrog.io/ce-sealed-secrets
-      tag: 1.0.0
+      name: quay.io/bitnami/sealed-secrets-controller
+      tag: v0.16.0
       pullPolicy: IfNotPresent

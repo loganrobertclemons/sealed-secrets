@@ -1,9 +1,9 @@
 apiVersion: v2
 appVersion: 1.0.0
 version: 1.0.0
-name: ce-sealed-secrets
+name: sealed-secrets
 description: SealedSecrets by bitnami for cloud engineering team
 type: application
 maintainers:
-  - name: Lirio Cloud Engineering
-    email: cloud-engineering@lirio.co
+  - name: Logan Clemons
+    email: loganrobertclemons@gmail.com
